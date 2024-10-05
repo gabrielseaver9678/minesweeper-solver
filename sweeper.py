@@ -731,6 +731,21 @@ class MinesweeperGameState:
     #   which themselves do not run binary tile state reduction
     # - Can replace some (or maybe all? figure out) "possibilities reductions"
     
+    # TODO:
+    # Strategy:
+    # - Something based on total number of mines
+    # - Eventual strategy involving taking a chance
+    # Polishings:
+    # - Command line options, particularly on flag placement, eventually
+    #   on whether imperfect or risky moves are allowed, eventually on
+    #   interaction movement (mouse control, etc.)
+    # - EVENTUALLY recognizing game completion or failure
+    # - Printing finishing info: whether the game was completed,
+    #   whether the game failed, and timing -- how long the solver took
+    # - Better tile recognition around board with new screenshot strategy
+    # - Another control layer between interaction and hardware allows for
+    #   controlling mouse movement and clicks, maybe
+    
     def __try_possibilities_reduction_at(self, hcol: int, hrow: int, itile_state: int, imines: int, igreens_locations: list[tuple[int, int]], debug:bool=False):
         host_tile_state = self.get_tile(hcol, hrow)
         move_made = False
