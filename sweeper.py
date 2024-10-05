@@ -1,4 +1,5 @@
 import copy
+import datetime
 import sys
 import pynput
 import pyautogui
@@ -31,9 +32,6 @@ class Color:
     
     @staticmethod
     def from_pixel(image: Image.Image, x: int, y: int):
-        # TODO: PIL image getpixel color doesn't agree
-        # with gpick color picker from image color OR
-        # imagemagick color analyzer from saved PNG
         return Color.from_rgb(image.getpixel([x, y]))
     
     def __repr__(self):
@@ -45,7 +43,7 @@ class Color:
         diffs = [ (c1[i]-c2[i])**2 for i in range(3) ]
         return diffs[0] + diffs[1] + diffs[2]
     
-    def compare(self, other, tol:int=17) -> bool:
+    def compare(self, other, tol: int) -> bool:
         return self.__get_quantitative_diff(other) <= tol
     
     def get_best_match(self, other_colors) -> int:
@@ -63,7 +61,7 @@ class Color:
     
     def __eq__(self, other) -> bool:
         if isinstance(other, Color):
-            return self.compare(other)
+            return self.compare(other, 0)
         else:
             return NotImplemented
 
@@ -134,10 +132,21 @@ class Vec2D:
 
 class Resources(Enum):
     FLAG_ICON = "resources/flag_icon.png"
+    
+    COLOR_GREEN_TILE_LIGHT = Color(0xA9D652)
+    COLOR_GREEN_TILE_DARK = Color(0xA1D04A)
+    
+    COLOR_MINES_1 = Color(0x1976D2)
+    COLOR_MINES_2 = Color(0x388E3C)
+    COLOR_MINES_3 = Color(0xD32F2F)
+    COLOR_MINES_4 = Color(0x7B1FA2)
+    COLOR_MINES_5 = Color(0xFF8F00)
+    COLOR_MINES_6 = Color(0x0097A7)
+    COLOR_MINES_7 = Color(0x424242)
+    COLOR_MINES_8 = Color(0x9E9C9A)
+
 
 class GameGridCalibration:
-    tileColor1: Color
-    tileColor2: Color
     
     flag_icon_position: Vec2D
     
@@ -178,31 +187,113 @@ class GameGridCalibration:
         # Stillness before grid reference screenshot
         self.debug_print(f"Moving mouse to flag at ({flag_x}, {flag_y})")
         pyautogui.moveTo(flag_x, flag_y)
-        time.sleep(0.2)
+        pyautogui.sleep(0.2)
         screen_view = pyautogui.screenshot()
-        start_x, start_y = [flag_x, flag_y + 50]
+        start_x, start_y = [flag_x - 50, flag_y]
         
-        # Update self.tileColor1 and tileColor2
-        self.__update_tile_colors(screen_view, start_x, start_y)
+        # TODO: Implement new calibration technique and code background colors
+        # into the resources enum, use tileColor with comments listed above
+        # Also adjust color equality to use tol=0 by default
+        grid_top_y = self.__get_grid_top_y(screen_view, start_x, start_y)
+        grid_left_x, grid_right_x, self.num_tile_cols = self.__get_grid_left_right_xs_tiles(screen_view, start_x, grid_top_y)
+        grid_bottom_y, self.num_tile_rows = self.__get_grid_bottom_y_tiles(screen_view, grid_left_x, grid_top_y)
         
-        # Calibrate X and Y grid dimensions
-        x1, x2, self.num_tile_cols = self.__get_calibrated_grid_dimension(screen_view, start_x, start_y, 0)
-        y1, y2, self.num_tile_rows = self.__get_calibrated_grid_dimension(screen_view, start_x, start_y, 1)
-        self.edge_coords = [Vec2D(x1, y1), Vec2D(x2, y2)]
+        self.edge_coords = [
+            Vec2D(grid_left_x, grid_top_y),
+            Vec2D(grid_right_x, grid_bottom_y),
+        ]
         
         if self.debug:
-            x1, y1 = self.edge_coords[0].components()
-            x2, y2 = self.edge_coords[1].components()
             print(f"Grid coordinates found: top left {self.edge_coords[0]} to bottom right {self.edge_coords[1]}.")
             print(f"Tiles are {self.num_tile_cols} x {self.num_tile_rows}.")
-            
-            pyautogui.moveTo(x1, y1)
-            d = 0.75
-            pyautogui.moveTo(x2, y1, duration=d)
-            pyautogui.moveTo(x2, y2, duration=d)
-            pyautogui.moveTo(x1, y2, duration=d)
-            pyautogui.moveTo(x1, y1, duration=d)
         print("Game grid successfully calibrated.")
+    
+    def __get_grid_top_y(self, screen_view: Image.Image, start_x: int, start_y: int) -> int:
+        game_top_bar_color = Color.from_pixel(screen_view, start_x, start_y)
+        for y in range(start_y, pyautogui.size().height):
+            if Color.from_pixel(screen_view, start_x, y) != game_top_bar_color:
+                if self.debug:
+                    pyautogui.moveTo(start_x, start_y)
+                    pyautogui.moveTo(start_x, y, duration=0.5)
+                return y
+        raise MinesweeperException("Could not find top edge of minesweeper grid")
+    
+    def __get_grid_left_right_xs_tiles(self, screen_view: Image.Image, start_x: int, grid_top_y: int) -> tuple[int, int, int]:
+        color_brightness = lambda c: max(c.r, c.g, c.b)
+        left_x = None
+        right_x = None
+        
+        # Dark background to left and right of grid
+        
+        # Find left edge
+        y = grid_top_y
+        for x in range(start_x, 0, -1):
+            color = Color.from_pixel(screen_view, x, y)
+            if color_brightness(color) < 60:
+                left_x = x + 1
+                break
+        if left_x is None:
+            raise MinesweeperException("Could not find left edge of minesweeper grid")
+        
+        if self.debug:
+            pyautogui.moveTo(start_x, y)
+            pyautogui.moveTo(left_x, y, duration=0.5)
+        
+        # Find right edge AND count tile cols
+        tile_width = None
+        tile_color = None
+        
+        for x in range(left_x, pyautogui.size().width, 1):
+            color = Color.from_pixel(screen_view, x, y)
+            if color_brightness(color) < 50:
+                right_x = x - 1
+                break
+            # Find tile width
+            if tile_color is None:
+                tile_color = color
+            elif color != tile_color and tile_width is None:
+                tile_width = x - left_x
+        if right_x is None:
+            raise MinesweeperException("Could not find right edge of minesweeper grid")
+        
+        if self.debug:
+            pyautogui.moveTo(right_x, y, duration=0.5)
+        
+        num_tiles = int(round((right_x - left_x) / float(tile_width)))
+        return (left_x, right_x, num_tiles)
+    
+    def __get_grid_bottom_y_tiles(self, screen_view: Image.Image, grid_left_x: int, grid_top_y: int) -> tuple[int]:
+        color_brightness = lambda c: max(c.r, c.g, c.b)
+        
+        tile_color = None
+        tile_height = None
+        
+        # Dark background underneath grid
+        x = grid_left_x
+        bottom_y = None
+        for y in range(grid_top_y, pyautogui.size().height):
+            color = Color.from_pixel(screen_view, x, y)
+            if color_brightness(color) < 50:
+                if self.debug:
+                    pyautogui.moveTo(x, grid_top_y)
+                    pyautogui.moveTo(x, y - 1, duration=0.5)
+                bottom_y = y - 1
+                break
+            # Count tiles
+            if tile_color is None:
+                tile_color = color
+            elif color != tile_color and tile_height is None:
+                tile_height = y - grid_top_y
+        if bottom_y is None:
+            raise MinesweeperException("Could not find bottom edge of grid")
+        
+        # TODO: Need new algorithm for counting tiles. Didn't work for hard 24x20 one time
+        # 1) Get approximate tile width
+        # 2) Skip forward to that width then go to next color
+        # 3) Do this for total number of tiles (width/color hybrid method)
+        
+        num_tiles = int(round((bottom_y - grid_top_y) / float(tile_height)))
+        return (bottom_y, num_tiles)
     
     def __get_calibrated_grid_dimension(self, screen_view: Image.Image, start_x: int, start_y: int, dimension: int) -> tuple[int, int, int]:
         """
@@ -289,7 +380,7 @@ class GameGridCalibration:
         
         self.tileColor1 = tileColor1
         self.tileColor2 = tileColor2
-    
+
     def __locate_flag(self) -> tuple[int, int]:
         self.debug_print("Locating flag...")
         result = None
@@ -316,9 +407,21 @@ clicked / uncovered (best bets if no better deduction can be made).
 """
 
 class MinesweeperGameState:
+    __VALID_GAME_STATES = [
+        ("Easy", 10, 8, 10),
+        ("Medium", 18, 14, 40),
+        ("Hard", 24, 20, 99),
+    ]
+    
     def __init__(self, cols: int, rows: int):
         self.cols = cols
         self.rows = rows
+        
+        states = list(filter(lambda state: state[1] == self.cols and state[2] == self.rows, self.__VALID_GAME_STATES))
+        if len(states) == 0:
+            raise MinesweeperException(f"No valid game type has columns and rows {self.cols} x {self.rows}")
+        self.game_mode_name: str = states[0][0]
+        self.num_mines: int = states[0][3]
         
         self.__tile_states: list[list[TILE_STATE]] = [[
             "GREEN" for row_num in range(self.rows)
@@ -348,21 +451,138 @@ class MinesweeperGameState:
         elif row < 0 or row >= self.rows:
             raise ValueError("Row out of range")
         
-        if state != "GREEN":
+        if state != "GREEN" and state != "MINE":
             self.__any_moves_made = True
         
         self.__tile_states[col][row] = state
+    
+    def has_move_been_made(self) -> bool:
+        return self.__any_moves_made
     
     def reduce_state(self):
         """
         Reduce the state of the game board.
         """
         max_iters = 100
-        
         for _ in range(max_iters):
             continue_reduction = self.reduce_state_single_step()
             if not continue_reduction:
                 break
+    
+    def get_all_positions(self):
+        for col in range(self.cols):
+            for row in range(self.rows):
+                yield (col, row)
+    
+    def get_neighborhood(self, col: int, row: int):
+        min_col, max_col = max(0, col - 1), min(self.cols, col + 2)
+        min_row, max_row = max(0, row - 1), min(self.rows, row + 2)
+        
+        for nc in range(min_col, max_col):
+            for nr in range(min_row, max_row):
+                if nc != col or nr != row:
+                    yield (nc, nr)
+    
+    def __try_uncover_middle_tile(self) -> bool:
+        """
+        Solve strategy for beginning of game--just uncover a tile
+        in the middle of the game board
+        """
+        # If no moves have been made, then uncover a tile in the middle of the board
+        if not self.__any_moves_made:
+            self.set_tile(int(self.cols / 2), int(self.rows / 2), "UNCOVER")
+            return True
+        else:
+            return False
+    
+    def __get_tile_neighbor_stats(self, col, row) -> tuple[int, int, int]:
+        """
+        Return (numbers, mines, greens) numbers of neighboring tile types
+        """
+        num_number_neighbors = 0
+        num_mine_neighbors = 0
+        num_green_neighbors = 0
+        
+        # Check number of green neighboring tiles
+        for nc, nr in self.get_neighborhood(col, row):
+            state = self.get_tile(nc, nr)
+            if state == "GREEN":
+                num_green_neighbors += 1
+            elif state == "MINE":
+                num_mine_neighbors += 1
+            else:
+                num_number_neighbors += 1
+        
+        return (num_number_neighbors, num_mine_neighbors, num_green_neighbors)
+    
+    # def __try_single_green_tiles(self) -> bool:
+    #     """
+    #     If there is exactly one green tile in a particular tile's neighborhood,
+    #     determine its state.
+    #     """
+    #     move_made = False
+        
+    #     for col, row in self.get_all_positions():
+            
+    #         # Check if host tile is number, otherwise skip
+    #         host_tile_state = self.get_tile(col, row)
+    #         if not isinstance(host_tile_state, int):
+    #             continue
+            
+            
+            
+    #         # If exactly 1 green neighboring tile, figure
+    #         # out its state
+    #         if num_green_neighbors == 1:
+    #             num_remaining_mines = host_tile_state - num_mine_neighbors
+    #             if num_remaining_mines == 0:
+    #                 self.set_tile(target_col, target_row, "UNCOVER")
+    #             elif num_remaining_mines == 1:
+    #                 self.set_tile(target_col, target_row, "MINE")
+    #             else:
+    #                 # TODO: How to handle invalid state (or invalid states based on presumed state)
+    #                 print(f"WARNING! Invalid state: expected {num_remaining_mines} in neighborhood of tile {col} x {row}. Uncovering remaining neighbor")
+    #                 self.set_tile(target_col, target_row, "UNCOVER")
+    #             move_made = True
+        
+    #     return move_made
+    
+    def __try_mine_saturated_tiles(self) -> bool:
+        """
+        Find number tiles with the exact correct number of mines around them.
+        """
+        move_made = False
+        for col, row in self.get_all_positions():
+            host_tile_state = self.get_tile(col, row)
+            if not isinstance(host_tile_state, int):
+                continue
+            
+            nums, mines, greens = self.__get_tile_neighbor_stats(col, row)
+            if mines == host_tile_state:
+                for nc, nr in self.get_neighborhood(col, row):
+                    if self.get_tile(nc, nr) == "GREEN":
+                        self.set_tile(nc, nr, "UNCOVER")
+                        move_made = True
+        return move_made
+        
+    def __try_green_saturated_tiles(self) -> bool:
+        """
+        Find number tiles which need all remaining green tiles to be mines in
+        order to fulfill their numbers.
+        """
+        move_made = False
+        for col, row in self.get_all_positions():
+            host_tile_state = self.get_tile(col, row)
+            if not isinstance(host_tile_state, int):
+                continue
+            
+            nums, mines, greens = self.__get_tile_neighbor_stats(col, row)
+            if greens + mines == host_tile_state:
+                for nc, nr in self.get_neighborhood(col, row):
+                    if self.get_tile(nc, nr) == "GREEN":
+                        self.set_tile(nc, nr, "MINE")
+                        move_made = True
+        return move_made
     
     def reduce_state_single_step(self) -> bool:
         """
@@ -371,24 +591,48 @@ class MinesweeperGameState:
         `false` otherwise.
         """
         
-        # If no moves have been made, then uncover a tile in
-        # the middle of the board
-        if not self.__any_moves_made:
-            self.set_tile(self.cols / 2, self.rows / 2, "UNCOVER")
+        move_made = False
         
-        return False
+        move_made = self.__try_uncover_middle_tile() or move_made
+        move_made = self.__try_green_saturated_tiles() or move_made
+        move_made = self.__try_mine_saturated_tiles() or move_made
+        
+        return move_made
 
 class GameGridInteractionLayer:
+    __ANIM_TIME_REMOVE_FLAG = 4.6
+    # TODO: Carefully determined time, could make algorithm for obscured vision
+    # by searching through all pixels in a box and finding pixels with lowest diffs
+    # to known colors
+    __ANIM_TIME_UNCOVER = 1.05
+    __ANIM_TIME_ADD_FLAG = 0.1
+    
     def __init__(self, grid: GameGridCalibration):
         self.grid = grid
         self.cols = grid.num_tile_cols
         self.rows = grid.num_tile_rows
         self.__true_game_state = MinesweeperGameState(self.cols, self.rows)
+        for col, row in self.__true_game_state.get_all_positions():
+            self.__true_game_state.set_tile(col, row, "UNCOVER")
         self.__last_game_screenshot: Image.Image|None = None
+        self.__time_to_last_animation_finish = datetime.datetime.now()
+    
+    def __game_action_animation_time(self, animation_time_seconds: float):
+        """
+        To be called internally when an action is taken where an animation could interfere
+        with the correct judgement of the game state from a screenshot. The duration of the
+        animation should be passed into the function so we can wait the correct amount of
+        time before taking a screenshot.
+        """
+        ttf = datetime.datetime.now() + datetime.timedelta(seconds=animation_time_seconds)
+        if ttf > self.__time_to_last_animation_finish:
+            self.__time_to_last_animation_finish = ttf
     
     def __get_new_game_screenshot(self) -> Image.Image:
         pyautogui.moveTo(self.grid.flag_icon_position.x, self.grid.flag_icon_position.y)
-        time.sleep(0.8)
+        wait_time = (self.__time_to_last_animation_finish - datetime.datetime.now()).total_seconds()
+        if wait_time > 0:
+            pyautogui.sleep(wait_time)
         return pyautogui.screenshot()
     
     def __tile_lookup(self, col: int, row: int) -> TILE_STATE:
@@ -451,12 +695,12 @@ class GameGridInteractionLayer:
         return self.__tile_colors_lookup(base_color, content_color)
     
     def __tile_colors_lookup(self, base_color: Color, content_color: Color|None) -> TILE_STATE:
-        if base_color == self.grid.tileColor1 or base_color == self.grid.tileColor2:
+        if base_color.compare(Resources.COLOR_GREEN_TILE_LIGHT.value, 17) or base_color.compare(Resources.COLOR_GREEN_TILE_DARK.value, 17):
             # Green tile background
             if content_color == None:
                 return "GREEN"
             else:
-                # We can just assume the 
+                # We can just assume the tile is a mine
                 return "MINE"
         else:
             # Non-green tile
@@ -467,14 +711,14 @@ class GameGridInteractionLayer:
                 # TODO: How to deal with antialiasing
                 # Match against colors for numbers
                 colors_list = [
-                    Color(0x1976D2), # 1
-                    Color(0x388E3C), # 2
-                    Color(0xD32F2F), # 3
-                    Color(0x7B1FA2), # 4
-                    Color(0xFF8F00), # 5
-                    Color(0x0097A7), # 6
-                    Color(0x424242), # 7
-                    Color(0x9E9C9A), # 8
+                    Resources.COLOR_MINES_1.value,
+                    Resources.COLOR_MINES_2.value,
+                    Resources.COLOR_MINES_3.value,
+                    Resources.COLOR_MINES_4.value,
+                    Resources.COLOR_MINES_5.value,
+                    Resources.COLOR_MINES_6.value,
+                    Resources.COLOR_MINES_7.value,
+                    Resources.COLOR_MINES_8.value,
                 ]
                 
                 idx = content_color.get_best_match(colors_list)
@@ -491,11 +735,10 @@ class GameGridInteractionLayer:
         self.__last_game_screenshot = None
         
         # Set all MINE or GREEN tiles to UNCOVER, signifying that they're not yet known
-        for col in range(self.cols):
-            for row in range(self.rows):
-                current_tile_state: TILE_STATE = self.__true_game_state.get_tile(col, row)
-                if current_tile_state == "MINE" or current_tile_state == "GREEN":
-                    self.__true_game_state.set_tile(col, row, "UNCOVER")
+        for col, row in self.__true_game_state.get_all_positions():
+            current_tile_state: TILE_STATE = self.__true_game_state.get_tile(col, row)
+            if current_tile_state == "MINE" or current_tile_state == "GREEN":
+                self.__true_game_state.set_tile(col, row, "UNCOVER")
     
     def get_tile(self, col: int, row: int) -> TILE_STATE:
         """
@@ -518,32 +761,32 @@ class GameGridInteractionLayer:
             return tile_state
         else:
             # Tile state is known (not UNCOVER)
-            return self.__tile_lookup(col, row)
+            return lookup_tile_state
     
     def __click_tile(self, col: int, row: int, button):
         location = self.grid.get_position(col, row)
         pyautogui.click(location.x, location.y, button=button)
     
-    def uncover_tile(self, col: int, row: int):
+    def uncover_tiles(self, tiles: list[tuple[int, int]]):
         """
         Uncover (left click) a given tile. Fails if the tile is not GREEN or MINE
         (i.e. if it's not an actionable tile).
         """
         
-        # Check if we can uncover a mine here
-        tile_state = self.get_tile(col, row)
-        if tile_state != "GREEN" and tile_state != "MINE":
-            raise MinesweeperException(f"Cannot uncover non-green or non-flag tile: {col} x {row}")
+        tiles = [ (col, row, self.get_tile(col, row)) for col, row in tiles ]
         
-        # Right click the tile if it has a flag on it to remove the flag first
-        if tile_state == "MINE":
-            self.__click_tile(col, row, "RIGHT")
-        
-        # Click the tile to uncover
-        self.__click_tile(col, row, "LEFT")
-        
-        # Update the game status so we know that a tile was uncovered
-        self.__tile_uncover_update()
+        for col, row, tile_state in tiles:
+            # Right click the tile if it has a flag on it to remove the flag first
+            if tile_state == "MINE":
+                self.__click_tile(col, row, "RIGHT")
+                self.__game_action_animation_time(self.__ANIM_TIME_REMOVE_FLAG)
+            
+            # Click the tile to uncover
+            self.__click_tile(col, row, "LEFT")
+            self.__game_action_animation_time(self.__ANIM_TIME_UNCOVER)
+            
+            # Update the game status so we know that a tile was uncovered
+            self.__tile_uncover_update()
     
     def set_flagged_status(self, col: int, row: int, flagged_status: bool):
         """
@@ -561,6 +804,7 @@ class GameGridInteractionLayer:
         if flagged_status != (tile_state == "MINE"):
             # Right click the tile
             self.__click_tile(col, row, "RIGHT")
+            self.__game_action_animation_time(self.__ANIM_TIME_ADD_FLAG if flagged_status else self.__ANIM_TIME_REMOVE_FLAG)
             # Update the game state
             self.__true_game_state.set_tile(col, row, "MINE" if flagged_status else "GREEN")
 
@@ -568,24 +812,68 @@ class GameSolver:
     def __init__(self, interact: GameGridInteractionLayer):
         self.interact = interact
         self.game_state = MinesweeperGameState(self.interact.cols, self.interact.rows)
+        
+        
+        # Read tile states
+        self.__update_true_game_state()
+        game_desc = f"'{self.game_state.game_mode_name}' {self.game_state.cols} x {self.game_state.rows} game with {self.game_state.num_mines} total mines"
+        if not self.game_state.has_move_been_made():
+            print(f"Beginning solve of {game_desc}.")
+        else:
+            print(f"Attempting to complete partial solve of {game_desc}.")
+    
+    def __update_true_game_state(self):
+        for col, row in self.game_state.get_all_positions():
+            true_state = self.interact.get_tile(col, row)
+            if isinstance(true_state, int):
+                self.game_state.set_tile(col, row, true_state)
+    
+    def __interact_update_tile_states(self):
+        uncover_tiles = []
+        tiles_flag_states = []
+        for col, row in self.game_state.get_all_positions():
+            state = self.game_state.get_tile(col, row)
+            if state == "UNCOVER":
+                uncover_tiles.append((col, row))
+            elif state == "MINE":
+                tiles_flag_states.append((col, row, True))
+            elif state == "GREEN":
+                tiles_flag_states.append((col, row, False))
+        
+        for col, row, flag in tiles_flag_states:
+            self.interact.set_flagged_status(col, row, flag)
+        self.interact.uncover_tiles(uncover_tiles)
     
     def solve(self):
         self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
+        self.__solve_cycle()
     
     def __solve_cycle(self):
-        self.interact.uncover_tile(0, 0)
         
-        for col in range(self.interact.cols):
-            for row in range(self.interact.rows):
-                tile_state = self.interact.get_tile(col, row)
-                if isinstance(tile_state, int):
-                    print(tile_state)
-                    pyautogui.moveTo(self.interact.grid.get_position(col, row, Vec2D(0, 0)).components())
-                    pyautogui.moveTo(self.interact.grid.get_position(col, row, Vec2D(1, 0)).components(), duration=0.25)
-                    pyautogui.moveTo(self.interact.grid.get_position(col, row, Vec2D(1, 1)).components(), duration=0.25)
-                    pyautogui.moveTo(self.interact.grid.get_position(col, row, Vec2D(0, 1)).components(), duration=0.25)
-                    pyautogui.moveTo(self.interact.grid.get_position(col, row, Vec2D(0, 0)).components(), duration=0.25)
-        pass
+        # Update and reduce the game state
+        self.__update_true_game_state()
+        self.game_state.reduce_state()
+        
+        # Look up mines to flag (or unflag if green) and boxes to uncover
+        self.__interact_update_tile_states()
 
 def sweep_mines(debug: bool) -> bool:
     print("== Minesweeper Solver ==")
@@ -627,10 +915,10 @@ def __wait_sweep_mines(debug: bool):
     # __wait_for_spacebar()
     input()
     print("3 seconds before start...\n")
-    time.sleep(3)
+    pyautogui.sleep(3)
     
     try:
-        sweep_mines(debug)
+        return sweep_mines(debug)
     except MinesweeperException as e:
         print(f"Error! {e}")
         return False
