@@ -1,5 +1,6 @@
 import copy
 import datetime
+import math
 import sys
 import pynput
 import pyautogui
@@ -145,6 +146,80 @@ class Resources(Enum):
     COLOR_MINES_7 = Color(0x424242)
     COLOR_MINES_8 = Color(0x9E9C9A)
 
+class GridString:
+    def __init__(self):
+        self.__lines: list[str] = []
+        self.__x_start = 0
+        self.__y_start = 0
+    
+    def get_full_string(self) -> str:
+        return "\n".join(self.__lines)+"\n"
+    
+    def __repr__(self):
+        return self.get_full_string()
+    
+    def put_char(self, char: str, x: int, y: int):
+        char = char[0]
+        
+        # Shift everything to the right if need be
+        if x < self.__x_start:
+            right_shift_by = self.__x_start - x
+            for idx, line in enumerate(self.__lines):
+                self.__lines[idx] = " " * right_shift_by + line
+            self.__x_start = x
+        
+        # Shift everything down if need be
+        if y < self.__y_start:
+            down_shift_by = self.__y_start - y
+            self.__lines = [ "" for _ in range(down_shift_by) ] + self.__lines
+            self.__y_start = y
+        
+        # Get the true x and y indices based on where the grid starts
+        true_x_idx = x - self.__x_start
+        true_y_idx = y - self.__y_start
+        
+        # Create extra lines down if need be
+        if true_y_idx >= len(self.__lines):
+            new_lines = 1 + true_y_idx - len(self.__lines)
+            self.__lines = self.__lines + [ "" for _ in range(new_lines) ]
+        
+        # Create extra spaces within correct line if need be
+        if true_x_idx >= len(self.__lines[true_y_idx]):
+            new_spaces = 1 + true_x_idx - len(self.__lines[true_y_idx])
+            self.__lines[true_y_idx] = self.__lines[true_y_idx] + " " * new_spaces
+        
+        # Modify the line by inserting the character
+        new_line = self.__lines[true_y_idx]
+        new_line = new_line[:true_x_idx] + char + new_line[(true_x_idx+1):]
+        self.__lines[true_y_idx] = new_line
+    
+    def get_char(self, x: int, y: int) -> str:
+        true_x_idx = x - self.__x_start
+        true_y_idx = y - self.__y_start
+        if true_y_idx < 0 or true_y_idx >= len(self.__lines):
+            return " "
+        if true_x_idx < 0 or true_x_idx >= len(self.__lines[true_y_idx]):
+            return " "
+        return self.__lines[true_y_idx][true_x_idx]
+    
+    def put_str(self, content, x: int, y: int, dir:Literal["down"]|Literal["right"]="right", justify:Literal["start"]|Literal["center"]|Literal["end"]="start"):
+        content = str(content)
+        char_xy = [x, y]
+        
+        # Get offsets for different justifications
+        offset = 0 # 0 for "start"
+        if justify == "center":
+            offset = math.ceil(len(content) / 2) - 1
+        elif justify == "end":
+            offset = len(content) - 1
+        
+        # Adjust for offset from justification
+        comp_idx = 1 if (dir == "down") else 0
+        char_xy[comp_idx] -= offset
+        
+        for char in content:
+            self.put_char(char, char_xy[0], char_xy[1])
+            char_xy[comp_idx] += 1
 
 class GameGridCalibration:
     
@@ -195,8 +270,8 @@ class GameGridCalibration:
         # into the resources enum, use tileColor with comments listed above
         # Also adjust color equality to use tol=0 by default
         grid_top_y = self.__get_grid_top_y(screen_view, start_x, start_y)
-        grid_left_x, grid_right_x, self.num_tile_cols = self.__get_grid_left_right_xs_tiles(screen_view, start_x, grid_top_y)
-        grid_bottom_y, self.num_tile_rows = self.__get_grid_bottom_y_tiles(screen_view, grid_left_x, grid_top_y)
+        grid_left_x, grid_right_x = self.__get_grid_left_right_xs(screen_view, start_x, grid_top_y)
+        grid_bottom_y = self.__get_grid_bottom_y(screen_view, grid_left_x, grid_top_y)
         
         self.edge_coords = [
             Vec2D(grid_left_x, grid_top_y),
@@ -205,7 +280,10 @@ class GameGridCalibration:
         
         if self.debug:
             print(f"Grid coordinates found: top left {self.edge_coords[0]} to bottom right {self.edge_coords[1]}.")
-            print(f"Tiles are {self.num_tile_cols} x {self.num_tile_rows}.")
+        
+        self.num_tile_cols = self.__get_num_tiles(screen_view, 0, grid_left_x, grid_right_x, grid_top_y)
+        self.num_tile_rows = self.__get_num_tiles(screen_view, 1, grid_top_y, grid_bottom_y, grid_left_x)
+        
         print("Game grid successfully calibrated.")
     
     def __get_grid_top_y(self, screen_view: Image.Image, start_x: int, start_y: int) -> int:
@@ -218,7 +296,7 @@ class GameGridCalibration:
                 return y
         raise MinesweeperException("Could not find top edge of minesweeper grid")
     
-    def __get_grid_left_right_xs_tiles(self, screen_view: Image.Image, start_x: int, grid_top_y: int) -> tuple[int, int, int]:
+    def __get_grid_left_right_xs(self, screen_view: Image.Image, start_x: int, grid_top_y: int) -> tuple[int, int, int]:
         color_brightness = lambda c: max(c.r, c.g, c.b)
         left_x = None
         right_x = None
@@ -239,34 +317,21 @@ class GameGridCalibration:
             pyautogui.moveTo(start_x, y)
             pyautogui.moveTo(left_x, y, duration=0.5)
         
-        # Find right edge AND count tile cols
-        tile_width = None
-        tile_color = None
-        
         for x in range(left_x, pyautogui.size().width, 1):
             color = Color.from_pixel(screen_view, x, y)
             if color_brightness(color) < 50:
                 right_x = x - 1
                 break
-            # Find tile width
-            if tile_color is None:
-                tile_color = color
-            elif color != tile_color and tile_width is None:
-                tile_width = x - left_x
         if right_x is None:
             raise MinesweeperException("Could not find right edge of minesweeper grid")
         
         if self.debug:
             pyautogui.moveTo(right_x, y, duration=0.5)
         
-        num_tiles = int(round((right_x - left_x) / float(tile_width)))
-        return (left_x, right_x, num_tiles)
+        return (left_x, right_x)
     
-    def __get_grid_bottom_y_tiles(self, screen_view: Image.Image, grid_left_x: int, grid_top_y: int) -> tuple[int]:
+    def __get_grid_bottom_y(self, screen_view: Image.Image, grid_left_x: int, grid_top_y: int) -> int:
         color_brightness = lambda c: max(c.r, c.g, c.b)
-        
-        tile_color = None
-        tile_height = None
         
         # Dark background underneath grid
         x = grid_left_x
@@ -279,21 +344,10 @@ class GameGridCalibration:
                     pyautogui.moveTo(x, y - 1, duration=0.5)
                 bottom_y = y - 1
                 break
-            # Count tiles
-            if tile_color is None:
-                tile_color = color
-            elif color != tile_color and tile_height is None:
-                tile_height = y - grid_top_y
         if bottom_y is None:
             raise MinesweeperException("Could not find bottom edge of grid")
         
-        # TODO: Need new algorithm for counting tiles. Didn't work for hard 24x20 one time
-        # 1) Get approximate tile width
-        # 2) Skip forward to that width then go to next color
-        # 3) Do this for total number of tiles (width/color hybrid method)
-        
-        num_tiles = int(round((bottom_y - grid_top_y) / float(tile_height)))
-        return (bottom_y, num_tiles)
+        return bottom_y
     
     def __get_calibrated_grid_dimension(self, screen_view: Image.Image, start_x: int, start_y: int, dimension: int) -> tuple[int, int, int]:
         """
@@ -357,6 +411,44 @@ class GameGridCalibration:
                 # Nothing happens! We found the same tile as last time. boooring
                 pass
         return [coord_edge, num_boxes_found]
+    
+    def __get_num_tiles(self, screen_view: Image.Image, component_idx: int, coord_start: int, coord_end: int, constant_coord: int):
+        xy = [0, 0]
+        xy[(component_idx + 1) % 2] = constant_coord
+        
+        num_tiles = 1
+        tile_color: Color|None = None
+        
+        coord = coord_start
+        while coord <= pyautogui.size()[component_idx] and coord < coord_end:
+            xy[component_idx] = coord
+            pixel_color = Color.from_pixel(screen_view, xy[0], xy[1])
+            
+            if tile_color == None:
+                # If the tile color is unset, set it and continue to the next pixel
+                tile_color = pixel_color
+                coord += 1
+            elif pixel_color == tile_color:
+                # If the tile color is set and this pixel is the same, continue
+                # to the next pixel
+                coord += 1
+            else:
+                # We've reached (roughly) the end of the tile (generally, besides borders)
+                # Increase the number of tiles and start at roughly halfway through the next tile
+                num_tiles += 1
+                tile_color = None
+                tile_width_approx = float(coord - coord_start) / float(num_tiles)
+                coord = int(tile_width_approx*0.5) + coord + 1
+        
+        if self.debug:
+            comp = "x" if component_idx == 0 else "y"
+            print(f"Num tiles along {comp}-axis: {num_tiles}")
+            xy[component_idx] = coord_start
+            pyautogui.moveTo(xy)
+            xy[component_idx] = coord_end
+            pyautogui.moveTo(xy, duration=0.5)
+        
+        return num_tiles
     
     def __update_tile_colors(self, screen_view: Image.Image, start_x: int, start_y: int):
         # First, establish tileColor1
@@ -432,6 +524,38 @@ class MinesweeperGameState:
         
         self.__any_moves_made = False
     
+    def get_grid_string_representation(self) -> str:
+        grid_str = GridString()
+        
+        x_mul = 2
+        y_mul = 1
+        
+        # Draw col and row markers
+        for col in range(self.cols):
+            grid_str.put_str(col, col * x_mul + x_mul-1, -3, dir="down", justify="end")
+        for row in range(self.rows):
+            grid_str.put_str(row, -3, row * y_mul, dir="right", justify="end")
+        grid_str.put_str("X"*(self.cols*x_mul + 1), -1, -1)
+        grid_str.put_str("X"*(self.rows*y_mul + 1), -1, -1, dir="down")
+        
+        for col, row in self.get_all_positions():
+            tile_state = self.get_tile(col, row)
+            x_pad = " "*(x_mul-1)
+            
+            repr = x_pad
+            if isinstance(tile_state, int):
+                repr += str(tile_state)
+            elif tile_state == "MINE":
+                repr += "#"
+            elif tile_state == "UNCOVER":
+                repr += "U"
+            else:
+                repr += "."
+            
+            grid_str.put_str(repr, col*x_mul, row*y_mul)
+        
+        return grid_str.get_full_string()
+    
     def get_tile(self, col: int, row: int) -> TILE_STATE:
         """
         Zero-indexed col and row. Get the state of the tile.
@@ -459,16 +583,6 @@ class MinesweeperGameState:
     def has_move_been_made(self) -> bool:
         return self.__any_moves_made
     
-    def reduce_state(self):
-        """
-        Reduce the state of the game board.
-        """
-        max_iters = 100
-        for _ in range(max_iters):
-            continue_reduction = self.reduce_state_single_step()
-            if not continue_reduction:
-                break
-    
     def get_all_positions(self):
         for col in range(self.cols):
             for row in range(self.rows):
@@ -482,6 +596,11 @@ class MinesweeperGameState:
             for nr in range(min_row, max_row):
                 if nc != col or nr != row:
                     yield (nc, nr)
+    
+    def in_neighborhood(self, host_col: int, host_row: int, target_col: int, target_row: int) -> bool:
+        col_diff = abs(host_col - target_col)
+        row_diff = abs(host_row - target_row)
+        return col_diff <= 1 and row_diff <= 1
     
     def __try_uncover_middle_tile(self) -> bool:
         """
@@ -514,38 +633,6 @@ class MinesweeperGameState:
                 num_number_neighbors += 1
         
         return (num_number_neighbors, num_mine_neighbors, num_green_neighbors)
-    
-    # def __try_single_green_tiles(self) -> bool:
-    #     """
-    #     If there is exactly one green tile in a particular tile's neighborhood,
-    #     determine its state.
-    #     """
-    #     move_made = False
-        
-    #     for col, row in self.get_all_positions():
-            
-    #         # Check if host tile is number, otherwise skip
-    #         host_tile_state = self.get_tile(col, row)
-    #         if not isinstance(host_tile_state, int):
-    #             continue
-            
-            
-            
-    #         # If exactly 1 green neighboring tile, figure
-    #         # out its state
-    #         if num_green_neighbors == 1:
-    #             num_remaining_mines = host_tile_state - num_mine_neighbors
-    #             if num_remaining_mines == 0:
-    #                 self.set_tile(target_col, target_row, "UNCOVER")
-    #             elif num_remaining_mines == 1:
-    #                 self.set_tile(target_col, target_row, "MINE")
-    #             else:
-    #                 # TODO: How to handle invalid state (or invalid states based on presumed state)
-    #                 print(f"WARNING! Invalid state: expected {num_remaining_mines} in neighborhood of tile {col} x {row}. Uncovering remaining neighbor")
-    #                 self.set_tile(target_col, target_row, "UNCOVER")
-    #             move_made = True
-        
-    #     return move_made
     
     def __try_mine_saturated_tiles(self) -> bool:
         """
@@ -584,6 +671,124 @@ class MinesweeperGameState:
                         move_made = True
         return move_made
     
+    # TODO: Optimization for searching
+    # 1) Create an ordered "tile frontier" of where to actually search
+    #    for deductions
+    # 2) Also create a list of animations and the boxes of tiles they affect,
+    #    and order the frontier based on when areas around tiles will be available
+    #    for screenshot analysis
+    # 3) Write the frontier code such that we can see which tiles need to be
+    #    re-checked at any given point, based on recent uncoverings
+    
+    def __try_possibilities_reduction(self, debug:tuple[int,int,int,int]|None=None) -> bool:
+        move_made = False
+        
+        for icol, irow in self.get_all_positions():
+            if debug is not None:
+                icol, irow = debug[2:4]
+            
+            intermediate_tile_state = self.get_tile(icol, irow)
+            if not isinstance(intermediate_tile_state, int):
+                continue
+            
+            _, imines, _ = self.__get_tile_neighbor_stats(icol, irow)
+            igreens_locations = []
+            for nc, nr in self.get_neighborhood(icol, irow):
+                if self.get_tile(nc, nr) == "GREEN":
+                    igreens_locations.append((nc, nr))
+            
+            if len(igreens_locations) == 0:
+                continue
+            
+            for hcol in range(icol - 2, icol + 3):
+                if hcol < 0 or hcol >= self.cols:
+                    continue
+                for hrow in range(irow - 2, irow + 3):
+                    if hrow < 0 or hrow >= self.rows:
+                        continue
+                    elif icol == hcol and irow == hrow:
+                        continue
+                    
+                    if debug is not None:
+                        hcol, hrow = debug[0:2]
+                    
+                    if self.__try_possibilities_reduction_at(hcol, hrow, intermediate_tile_state, imines, igreens_locations, debug=(debug is not None)):
+                        move_made = True
+                    
+                    if debug is not None:
+                        return
+        
+        return move_made
+    
+    # TODO: new strategy - binary tile state reducer
+    # 1) An "important" green tile is found
+    # 2) A new hypothetical child board is created with that green tile as a mine
+    #    and is reduced
+    # 3) A hypothetical child board is created with that tile as uncovered and is reduced
+    # 4) Any tiles in agreement between the two boards are marked in the parent game state
+    # Caveats:
+    # - Requires recursion checks, should run reductions of the binary children
+    #   which themselves do not run binary tile state reduction
+    # - Can replace some (or maybe all? figure out) "possibilities reductions"
+    
+    def __try_possibilities_reduction_at(self, hcol: int, hrow: int, itile_state: int, imines: int, igreens_locations: list[tuple[int, int]], debug:bool=False):
+        host_tile_state = self.get_tile(hcol, hrow)
+        move_made = False
+        
+        if debug:
+            print(f"Host tile state: {host_tile_state}, inter tile state: {itile_state}")
+            print(f"Inter's number of neighboring mines: {imines}")
+            print(f"Inter's green tiles: {igreens_locations}")
+        
+        if not isinstance(host_tile_state, int):
+            return False
+        
+        # Check if ALL intermediate's green tiles are within
+        # this host's neighborhood
+        if False in [ self.in_neighborhood(hcol, hrow, nc, nr) for nc, nr in igreens_locations ]:
+            return False
+        
+        # If all the intermediate's green tiles ARE within this host's
+        # neighborhood, then any remaining mines count towards this tile
+        hnums, hmines, hgreens = self.__get_tile_neighbor_stats(hcol, hrow)
+        inter_remaining_mines = itile_state - imines
+        
+        if debug:
+            print(f"Host's number of neighboring mines: {hmines}")
+        
+        # TOTAL number of mines left to find for the host
+        host_total_remaining_mines = host_tile_state - hmines
+        # Number of mines left to find for the host OUTSIDE the intermediate's neighborhood
+        host_rmines_after_intermediate = host_total_remaining_mines - inter_remaining_mines
+        
+        # Get list of host's green tiles which aren't in the intermediate's neighborhood
+        host_greens_outside_intermediate = []
+        for nc, nr in self.get_neighborhood(hcol, hrow):
+            if self.get_tile(nc, nr) == "GREEN" and not ((nc, nr) in igreens_locations):
+                host_greens_outside_intermediate.append((nc, nr))
+        if len(host_greens_outside_intermediate) == 0:
+            return False
+        
+        # TODO: Could CHAIN "optionals" (possibilities for mine locations) here, even if
+        # we can't find any definitive moves on this host, but implement this later
+        if host_rmines_after_intermediate == len(host_greens_outside_intermediate):
+            # All mines remaining in host's greens outside the intermediate
+            for tc, tr in host_greens_outside_intermediate:
+                self.set_tile(tc, tr, "MINE")
+                move_made = True
+                if debug:
+                    print(f"Found mine at {tc}x{tr}")
+                
+        elif host_rmines_after_intermediate == 0:
+            # No mines remaining in host's greens outside the intermediate
+            for tc, tr in host_greens_outside_intermediate:
+                self.set_tile(tc, tr, "UNCOVER")
+                move_made = True
+                if debug:
+                    print(f"Uncovered tile at {tc}x{tr}")
+        
+        return move_made
+    
     def reduce_state_single_step(self) -> bool:
         """
         Perform one step of game board state reduction.
@@ -596,8 +801,20 @@ class MinesweeperGameState:
         move_made = self.__try_uncover_middle_tile() or move_made
         move_made = self.__try_green_saturated_tiles() or move_made
         move_made = self.__try_mine_saturated_tiles() or move_made
+        if not move_made:
+            move_made = self.__try_possibilities_reduction()
         
         return move_made
+    
+    def reduce_state(self):
+        """
+        Reduce the state of the game board.
+        """
+        max_iters = 100
+        for _ in range(max_iters):
+            continue_reduction = self.reduce_state_single_step()
+            if not continue_reduction:
+                break
 
 class GameGridInteractionLayer:
     __ANIM_TIME_REMOVE_FLAG = 4.6
@@ -655,8 +872,12 @@ class GameGridInteractionLayer:
         
         # The base color of the tile
         base_color = None
-        content_x_start = None
-        content_x_end = None
+        current_content_x_start = None
+        
+        # We take several ranges and find the largest. This can be necessary
+        # for content (like the 5) which has short edges near the middle, which
+        # can lead to misreads
+        content_x_ranges = []
         
         y = int(round((y1 - y0) / 2 + y0))
         for x in range(x0, x1):
@@ -670,23 +891,33 @@ class GameGridInteractionLayer:
             
             # Record the start and end of the cross-section of the content
             # to later find the color of its center
-            if pixel_color != base_color and content_x_start is None:
+            if pixel_color != base_color and current_content_x_start is None:
                 # Non-base color pixel and content_x_start not yet found -- set it
-                content_x_start = x
-            if pixel_color == base_color and content_x_start is not None:
+                current_content_x_start = x
+            if pixel_color == base_color and current_content_x_start is not None:
                 # Base color pixel and content_x_start found -- end has been found
-                content_x_end = x
-                break
+                content_x_ranges.append((current_content_x_start, x))
+                current_content_x_start = None
+        
+        if current_content_x_start is not None:
+            content_x_ranges.append((current_content_x_start, x1))
         
         # The color of the foreground, if a foreground exists
         content_color = None
         
+        # Get the longest range from the content x ranges
+        content_x_start = 0
+        content_x_end = 0
+        for x_start, x_end in content_x_ranges:
+            if x_end - x_start > content_x_end - content_x_start:
+                content_x_start, content_x_end = x_start, x_end
+        
+        # Check if there was no content
+        if content_x_start == content_x_end:
+            content_x_start, content_x_end = None, None
+        
         # If a foreground exists
         if content_x_start is not None:
-            
-            # Set end X of foreground if one wasn't found
-            if content_x_end is None:
-                content_x_end = x1
             
             # Get the center of the foreground
             content_x_center = (content_x_end - content_x_start) / 2 + content_x_start
@@ -813,7 +1044,6 @@ class GameSolver:
         self.interact = interact
         self.game_state = MinesweeperGameState(self.interact.cols, self.interact.rows)
         
-        
         # Read tile states
         self.__update_true_game_state()
         game_desc = f"'{self.game_state.game_mode_name}' {self.game_state.cols} x {self.game_state.rows} game with {self.game_state.num_mines} total mines"
@@ -821,6 +1051,8 @@ class GameSolver:
             print(f"Beginning solve of {game_desc}.")
         else:
             print(f"Attempting to complete partial solve of {game_desc}.")
+            print("\nInitial grid state:")
+            print(self.game_state.get_grid_string_representation())
     
     def __update_true_game_state(self):
         for col, row in self.game_state.get_all_positions():
