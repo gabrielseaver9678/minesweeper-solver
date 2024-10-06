@@ -223,6 +223,8 @@ class GridString:
 
 class GameGridCalibration:
     
+    __BACKGROUND_MAX_BRIGHTNESS = 75
+    
     flag_icon_position: Vec2D
     
     edge_coords = tuple[Vec2D, Vec2D]
@@ -278,8 +280,8 @@ class GameGridCalibration:
         if self.debug:
             print(f"Grid coordinates found: top left {self.edge_coords[0]} to bottom right {self.edge_coords[1]}.")
         
-        self.num_tile_cols = self.__get_num_tiles(screen_view, 0, grid_left_x, grid_right_x, grid_top_y)
-        self.num_tile_rows = self.__get_num_tiles(screen_view, 1, grid_top_y, grid_bottom_y, grid_left_x)
+        self.num_tile_cols = self.__get_num_tiles(screen_view, 0, grid_left_x+1, grid_right_x-1, grid_top_y+1)
+        self.num_tile_rows = self.__get_num_tiles(screen_view, 1, grid_top_y+1, grid_bottom_y-1, grid_left_x+1)
         
         print("Game grid successfully calibrated.")
     
@@ -304,7 +306,7 @@ class GameGridCalibration:
         y = grid_top_y
         for x in range(start_x, 0, -1):
             color = Color.from_pixel(screen_view, x, y)
-            if color_brightness(color) < 60:
+            if color_brightness(color) < self.__BACKGROUND_MAX_BRIGHTNESS:
                 left_x = x + 1
                 break
         if left_x is None:
@@ -316,7 +318,7 @@ class GameGridCalibration:
         
         for x in range(left_x, pyautogui.size().width, 1):
             color = Color.from_pixel(screen_view, x, y)
-            if color_brightness(color) < 50:
+            if color_brightness(color) < self.__BACKGROUND_MAX_BRIGHTNESS:
                 right_x = x - 1
                 break
         if right_x is None:
@@ -335,7 +337,7 @@ class GameGridCalibration:
         bottom_y = None
         for y in range(grid_top_y, pyautogui.size().height):
             color = Color.from_pixel(screen_view, x, y)
-            if color_brightness(color) < 50:
+            if color_brightness(color) < self.__BACKGROUND_MAX_BRIGHTNESS:
                 if self.debug:
                     pyautogui.moveTo(x, grid_top_y)
                     pyautogui.moveTo(x, y - 1, duration=0.5)
@@ -898,7 +900,7 @@ class MinesweeperGameState:
         return any_move_made
 
 class GameGridInteractionLayer:
-    __ANIM_TIME_REMOVE_FLAG = 4.6
+    __ANIM_TIME_REMOVE_FLAG = 3.0
     # TODO: Carefully determined time, could make algorithm for obscured vision
     # by searching through all pixels in a box and finding pixels with lowest diffs
     # to known colors
