@@ -266,9 +266,6 @@ class GameGridCalibration:
         screen_view = pyautogui.screenshot()
         start_x, start_y = [flag_x - 50, flag_y]
         
-        # TODO: Implement new calibration technique and code background colors
-        # into the resources enum, use tileColor with comments listed above
-        # Also adjust color equality to use tol=0 by default
         grid_top_y = self.__get_grid_top_y(screen_view, start_x, start_y)
         grid_left_x, grid_right_x = self.__get_grid_left_right_xs(screen_view, start_x, grid_top_y)
         grid_bottom_y = self.__get_grid_bottom_y(screen_view, grid_left_x, grid_top_y)
@@ -532,11 +529,11 @@ class MinesweeperGameState:
         
         # Draw col and row markers
         for col in range(self.cols):
-            grid_str.put_str(col, col * x_mul + x_mul-1, -3, dir="down", justify="end")
+            grid_str.put_str(col, col * x_mul + x_mul-1, -2, dir="down", justify="end")
         for row in range(self.rows):
             grid_str.put_str(row, -3, row * y_mul, dir="right", justify="end")
-        grid_str.put_str("X"*(self.cols*x_mul + 1), -1, -1)
-        grid_str.put_str("X"*(self.rows*y_mul + 1), -1, -1, dir="down")
+        grid_str.put_str("|"*(self.rows*y_mul + 1), -1, -1, dir="down")
+        grid_str.put_str("_"*(self.cols*x_mul + 1), -1, -1)
         
         for col, row in self.get_all_positions():
             tile_state = self.get_tile(col, row)
@@ -804,7 +801,62 @@ class MinesweeperGameState:
         
         return move_made
     
-    def reduce_state_single_step(self) -> bool:
+    def __try_binary_option_reduction(self, recursion_limit: int) -> bool:
+        # Step 1 - Find and order good target tiles for binary reduction
+        target_tiles: list[tuple[int, int, int]] = [] # (score, col, row) with maximal score for best targets
+        for col, row in self.get_all_positions():
+            state = self.get_tile(col, row)
+            if state != "GREEN":
+                continue
+            
+            nums, mines, greens = self.__get_tile_neighbor_stats(col, row)
+            # We just allow the score of the tile to be the number of neighboring
+            # number tiles--this should target tiles with lots of impact on state
+            score = nums
+            
+            # We have to assign a practical cutoff, and having at least 3 neighbors
+            # seems alright
+            if score >= 2:
+                target_tiles.append((score, col, row))
+        
+        # Step 2 - walk through potential targets and see if we get anything.
+        # Keep trying until we get some moves made, but if we do make a move,
+        # we should return to less computationally intense strategies
+        for score, col, row in target_tiles:
+            move_made = self.__try_binary_option_reduction_at(recursion_limit, col, row)
+            if move_made:
+                return True
+        return False
+    
+    def __try_binary_option_reduction_at(self, recursion_limit: int, col: int, row: int):
+        # Create two child states
+        child_state_uncover = copy.deepcopy(self)
+        child_state_mine = copy.deepcopy(self)
+        
+        # Set the tile
+        child_state_uncover.set_tile(col, row, "UNCOVER")
+        child_state_mine.set_tile(col, row, "MINE")
+        
+        # Attempt reduction-ception
+        child_state_uncover.reduce_state(recursion_limit-1)
+        child_state_mine.reduce_state(recursion_limit-1)
+        
+        # Loop through tiles and find commonalities
+        move_made = False
+        for c, r in self.get_all_positions():
+            known_state = self.get_tile(c, r)
+            state_1 = child_state_uncover.get_tile(c, r)
+            state_2 = child_state_mine.get_tile(c, r)
+            if known_state == state_1 and state_1 == state_2:
+                # Nothing to see here. Boring!
+                continue
+            elif known_state != state_1 and state_1 == state_2:
+                # New state -- both binary options lead to shared state
+                self.set_tile(c, r, state_1)
+                move_made = True
+        return move_made
+    
+    def reduce_state_single_step(self, slow_options_ok: bool, binary_option_recursion_limit: int) -> bool:
         """
         Perform one step of game board state reduction.
         Returns `true` if more reduction should be completed,
@@ -818,18 +870,32 @@ class MinesweeperGameState:
         move_made = self.__try_mine_saturated_tiles() or move_made
         if not move_made:
             move_made = self.__try_possibilities_reduction()
+        if slow_options_ok and not move_made and binary_option_recursion_limit > 0:
+            move_made = self.__try_binary_option_reduction(binary_option_recursion_limit)
         
         return move_made
     
-    def reduce_state(self):
+    def reduce_state(self, binary_option_recursion_limit:int=2) -> bool:
         """
         Reduce the state of the game board.
         """
+        slow_options_ok = False
+        any_move_made = False
         max_iters = 100
         for _ in range(max_iters):
-            continue_reduction = self.reduce_state_single_step()
-            if not continue_reduction:
-                break
+            continue_reduction = self.reduce_state_single_step(slow_options_ok, binary_option_recursion_limit)
+            if continue_reduction:
+                slow_options_ok = False
+                any_move_made = True
+            else:
+                if any_move_made or slow_options_ok:
+                    # Just stop, if either we've already tried
+                    # slow options or if we've already made a move
+                    # (slow options not necessary)
+                    break
+                else:
+                    slow_options_ok = True
+        return any_move_made
 
 class GameGridInteractionLayer:
     __ANIM_TIME_REMOVE_FLAG = 4.6
@@ -848,6 +914,12 @@ class GameGridInteractionLayer:
             self.__true_game_state.set_tile(col, row, "UNCOVER")
         self.__last_game_screenshot: Image.Image|None = None
         self.__time_to_last_animation_finish = datetime.datetime.now()
+    
+    def get_true_game_state_representation(self) -> str:
+        # Just run through all tiles and make sure we have their values
+        for col, row in self.__true_game_state.get_all_positions():
+            self.get_tile(col, row)
+        return self.__true_game_state.get_grid_string_representation()
     
     def __game_action_animation_time(self, animation_time_seconds: float):
         """
@@ -1067,7 +1139,7 @@ class GameSolver:
         else:
             print(f"Attempting to complete partial solve of {game_desc}.")
             print("\nInitial grid state:")
-            print(self.game_state.get_grid_string_representation())
+            print(self.interact.get_true_game_state_representation())
     
     def __update_true_game_state(self):
         for col, row in self.game_state.get_all_positions():
@@ -1092,38 +1164,21 @@ class GameSolver:
         self.interact.uncover_tiles(uncover_tiles)
     
     def solve(self):
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
-        self.__solve_cycle()
+        continue_cycle = True
+        while continue_cycle:
+            continue_cycle = self.__solve_cycle()
     
-    def __solve_cycle(self):
+    def __solve_cycle(self) -> bool:
         
         # Update and reduce the game state
         self.__update_true_game_state()
-        self.game_state.reduce_state()
+        any_move_made = self.game_state.reduce_state()
         
         # Look up mines to flag (or unflag if green) and boxes to uncover
         self.__interact_update_tile_states()
+        return any_move_made
 
 def sweep_mines(debug: bool) -> bool:
-    print("== Minesweeper Solver ==")
     try:
         grid = GameGridCalibration(debug)
         interact = GameGridInteractionLayer(grid)
@@ -1132,10 +1187,6 @@ def sweep_mines(debug: bool) -> bool:
         solver.solve()
         
         # # TODO: Add time to complete from first click
-        
-        # game_state = MinesweeperGameState(grid.num_tile_cols, grid.num_tile_rows)
-        # game_state.reduce_state()
-        
         
         return True
     except pyautogui.FailSafeException:
